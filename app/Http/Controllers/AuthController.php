@@ -11,12 +11,9 @@ class AuthController extends Controller
     /**
      * POST /api/auth/send-otp  { mobile }
      *
-     * Looks up the staff record by mobile number. An OTP is generated once
-     * per staff member and kept with a long expiry — it is not regenerated
-     * on every login attempt, only when missing or actually expired.
-     *
-     * NOTE: No SMS gateway is configured yet, so the OTP lives in
-     * deli_staff.otp — check it there for testing.
+     * Looks up the staff record by mobile number. There is no OTP
+     * generation/SMS gateway — the admin sets a login code directly in
+     * deli_staff.password, and verifyOtp() matches against that column.
      */
     public function sendOtp(Request $request)
     {
@@ -48,15 +45,6 @@ class AuthController extends Controller
                 'status' => false,
                 'message' => 'This account is locked. Contact your admin.',
             ], 403);
-        }
-
-        $needsNewOtp = !$staff->otp || !$staff->otp_expires_at || now()->greaterThan($staff->otp_expires_at);
-
-        if ($needsNewOtp) {
-            DB::table('deli_staff')->where('mobile', $mobile)->update([
-                'otp' => (string) random_int(1000, 9999),
-                'otp_expires_at' => now()->addYear(),
-            ]);
         }
 
         return response()->json([
@@ -95,9 +83,7 @@ class AuthController extends Controller
             ], 404);
         }
 
-        $isExpired = !$staff->otp_expires_at || now()->greaterThan($staff->otp_expires_at);
-
-        if (!$staff->otp || $staff->otp !== $otp || $isExpired) {
+        if (!$staff->password || $staff->password !== $otp) {
             return response()->json([
                 'status' => false,
                 'message' => 'Invalid or expired OTP.',
