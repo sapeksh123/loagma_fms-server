@@ -249,6 +249,7 @@ class CategoryController extends Controller
         $validator = Validator::make($request->all(), [
             'name' => 'required|string|max:255',
             'image' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'image_base64' => 'nullable|string',
             'is_active' => 'boolean',
             'type' => 'nullable|string',
         ]);
@@ -263,13 +264,39 @@ class CategoryController extends Controller
 
         try {
             $data = $validator->validated();
-            
-            if ($request->hasFile('image')) {
-                $file = $request->file('image');
-                $data['image_name'] = $file->store('categories', 'public');
-                $data['image_slug'] = $file->getClientOriginalName();
+            unset($data['image_base64']); // Not a DB column - handled below.
+
+            $uploadPath = storage_path('app/uploads/categories');
+            if (!is_dir($uploadPath)) {
+                mkdir($uploadPath, 0755, true);
             }
-            
+
+            // Handle base64 image (from Flutter).
+            // image_slug column is varchar(15) - use short filename.
+            if ($request->has('image_base64') && !empty(trim($request->image_base64))) {
+                $imageBase64 = $request->image_base64;
+                if (strpos($imageBase64, ',') !== false) {
+                    $imageBase64 = substr($imageBase64, strpos($imageBase64, ',') + 1);
+                }
+                $imageData = base64_decode($imageBase64);
+                if ($imageData && strlen($imageData) > 50) {
+                    $fileName = 's' . substr((string) time(), -5) . mt_rand(10, 99) . '.png'; // max 12 chars
+                    if (file_put_contents($uploadPath . '/' . $fileName, $imageData)) {
+                        $data['image_name'] = $fileName;
+                        $data['image_slug'] = $fileName;
+                        $data['img_last_updated'] = time();
+                    }
+                }
+            } elseif ($request->hasFile('image')) {
+                $file = $request->file('image');
+                $fileName = 's' . substr((string) time(), -5) . mt_rand(10, 99) . '.png'; // max 12 chars
+                if ($file->move($uploadPath, $fileName)) {
+                    $data['image_name'] = $fileName;
+                    $data['image_slug'] = $fileName;
+                    $data['img_last_updated'] = time();
+                }
+            }
+
             unset($data['image']); // Remove image field, we use image_name and image_slug
 
             $data['cat_id'] = (int) (Category::max('cat_id') ?? 0) + 1;
@@ -317,7 +344,7 @@ class CategoryController extends Controller
                 'type' => 1,
             ];
 
-            $uploadPath = public_path('uploads/categories');
+            $uploadPath = storage_path('app/uploads/categories');
             if (!is_dir($uploadPath)) {
                 mkdir($uploadPath, 0755, true);
             }
@@ -399,7 +426,7 @@ class CategoryController extends Controller
                 if ($imageData && strlen($imageData) > 50) {
                     // Generate short filename to fit varchar(15) constraint
                     $fileName = 's' . substr(time(), -6) . '.png'; // s123456.png for subcategory
-                    $uploadPath = public_path('uploads/categories');
+                    $uploadPath = storage_path('app/uploads/categories');
                     
                     // Create directory if needed
                     if (!is_dir($uploadPath)) {
@@ -425,7 +452,7 @@ class CategoryController extends Controller
                 // Handle file upload (traditional form upload)
                 $file = $request->file('image');
                 $fileName = 's' . substr(time(), -6) . '.png';
-                $uploadPath = public_path('uploads/categories');
+                $uploadPath = storage_path('app/uploads/categories');
                 
                 if (!is_dir($uploadPath)) {
                     mkdir($uploadPath, 0755, true);

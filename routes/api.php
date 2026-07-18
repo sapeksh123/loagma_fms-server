@@ -198,7 +198,7 @@ Route::post('/test-category-create', function (Illuminate\Http\Request $request)
                 if ($imageData && strlen($imageData) > 50) {
                     // Use VERY short filename to fit varchar(15) constraint
                     $fileName = 'c' . substr(time(), -6) . '.png';  // c123456.png = 11 chars
-                    $uploadPath = public_path('uploads/categories');
+                    $uploadPath = storage_path('app/uploads/categories');
                     
                     // Create directory if needed
                     if (!is_dir($uploadPath)) {

@@ -653,7 +653,7 @@ class ProductController extends Controller
                     if ($imageData && strlen($imageData) > 50) {
                         // Generate filename
                         $fileName = 'product_' . $productData['product_id'] . '_' . time() . '.png';
-                        $uploadPath = public_path('uploads/products');
+                        $uploadPath = storage_path('app/uploads/products');
 
                         // Create directory if needed
                         if (!is_dir($uploadPath)) {
@@ -663,7 +663,7 @@ class ProductController extends Controller
                         // Save file
                         if (file_put_contents($uploadPath . '/' . $fileName, $imageData)) {
                             $productData['display_photo'] = '/uploads/products/' . $fileName;
-                            $productData['img_last_updated'] = now();
+                            $productData['img_last_updated'] = time();
                         }
                     }
                 } catch (\Exception $imageError) {
@@ -676,7 +676,7 @@ class ProductController extends Controller
             unset($productData['display_photo_base64']);
 
             // Set default values for required fields if not provided
-            $productData['start_date'] = $productData['start_date'] ?? now();
+            $productData['start_date'] = $productData['start_date'] ?? time();
             $productData['is_published'] = $productData['is_published'] ?? 0;
             $productData['is_used'] = $productData['is_used'] ?? 1;
             $productData['is_deleted'] = $productData['is_deleted'] ?? 0;
@@ -685,10 +685,11 @@ class ProductController extends Controller
             $productData['inventory_unit_type'] = $productData['inventory_unit_type'] ?? 'WEIGHT';
             $productData['ctype_id'] = $productData['ctype_id'] ?? 'vegetables_fruits';
             $productData['seq_no'] = $productData['seq_no'] ?? 0;
+            $productData['gst_percent'] = $productData['gst_percent'] ?? 0;
             $productData['spec_params'] = $productData['spec_params'] ?? '[]';
-            $productData['hsn_code'] = $productData['hsn_code'] ?: ''; // Ensure empty string, not null
-            $productData['keywords'] = $productData['keywords'] ?: ''; // Ensure empty string, not null
-            $productData['description'] = $productData['description'] ?: ''; // Ensure empty string, not null
+            $productData['hsn_code'] = $productData['hsn_code'] ?? ''; // Ensure empty string, not null
+            $productData['keywords'] = $productData['keywords'] ?? ''; // Ensure empty string, not null
+            $productData['description'] = $productData['description'] ?? ''; // Ensure empty string, not null
 
             // Handle packages - ensure it's a valid JSON string
             if (isset($productData['packs'])) {
@@ -869,7 +870,7 @@ class ProductController extends Controller
                     if ($imageData && strlen($imageData) > 50) {
                         // Generate filename
                         $fileName = 'product_' . $id . '_' . time() . '.png';
-                        $uploadPath = public_path('uploads/products');
+                        $uploadPath = storage_path('app/uploads/products');
 
                         // Create directory if needed
                         if (!is_dir($uploadPath)) {
@@ -879,7 +880,7 @@ class ProductController extends Controller
                         // Save file
                         if (file_put_contents($uploadPath . '/' . $fileName, $imageData)) {
                             $updateData['display_photo'] = '/uploads/products/' . $fileName;
-                            $updateData['img_last_updated'] = now();
+                            $updateData['img_last_updated'] = time();
                         }
                     }
                 } catch (\Exception $imageError) {
@@ -1077,7 +1078,7 @@ class ProductController extends Controller
 
             // Generate filename
             $fileName = 'product_' . $id . '_photo_' . $photoId . '_' . time() . '.png';
-            $uploadPath = public_path('uploads/products');
+            $uploadPath = storage_path('app/uploads/products');
 
             // Create directory if needed
             if (!is_dir($uploadPath)) {
@@ -1145,7 +1146,7 @@ class ProductController extends Controller
             }
 
             // Delete file if it exists
-            $filePath = public_path($photo->file_location);
+            $filePath = storage_path('app' . $photo->file_location);
             if (file_exists($filePath)) {
                 unlink($filePath);
             }

@@ -47,8 +47,6 @@ class Product extends Model
         'spec_params' => 'array',
         'packs' => 'array',
         'offers' => 'array',
-        'start_date' => 'datetime',
-        'img_last_updated' => 'datetime',
     ];
 
     // Custom accessors to handle corrupted JSON
