@@ -441,6 +441,176 @@ class OrderController extends Controller
         }
     }
 
+    /**
+     * Sales Invoice list for one customer — same "invoiced" rule used across the
+     * ledger/outstanding reports: an orders row counts as an invoice once
+     * COALESCE(order_total, 0) > 0, dated by Bill_Dt.
+     * GET /api/orders/customer/{buyerUserId}/invoices?from=&to=&page=&per_page=
+     */
+    public function customerInvoices(Request $request, $buyerUserId)
+    {
+        if (!ctype_digit((string) $buyerUserId) || (int) $buyerUserId <= 0) {
+            return response()->json([
+                'success' => false,
+                'message' => 'buyer_userid must be a positive integer',
+            ], 422);
+        }
+
+        try {
+            $resolvedBuyerUserId = (int) $buyerUserId;
+            $perPage = min(max((int) $request->get('per_page', 20), 1), 200);
+            $page = max((int) $request->get('page', 1), 1);
+
+            $query = DB::table('orders')
+                ->where('buyer_userid', $resolvedBuyerUserId)
+                ->whereRaw('COALESCE(order_total, 0) > 0');
+
+            if ($from = $request->get('from')) {
+                $query->whereDate('Bill_Dt', '>=', $from);
+            }
+            if ($to = $request->get('to')) {
+                $query->whereDate('Bill_Dt', '<=', $to);
+            }
+
+            $total = (clone $query)->count();
+            $lastPage = max((int) ceil($total / $perPage), 1);
+            $page = min($page, $lastPage);
+            $offset = ($page - 1) * $perPage;
+
+            $rows = $query
+                ->orderByDesc('Bill_Dt')
+                ->orderByDesc('order_id')
+                ->offset($offset)
+                ->limit($perPage)
+                ->select('order_id', 'bill_no', 'Bill_Dt', 'order_total', 'Bill_Narration')
+                ->get();
+
+            $data = $rows->map(fn ($o) => [
+                'order_id' => (int) $o->order_id,
+                'doc_no' => $o->bill_no ?: (string) $o->order_id,
+                'doc_date' => $o->Bill_Dt,
+                'amount' => (float) $o->order_total,
+                'narration' => $o->Bill_Narration,
+            ])->values();
+
+            return response()->json($this->sanitizeForJson([
+                'success' => true,
+                'data' => $data,
+                'pagination' => [
+                    'total' => $total,
+                    'per_page' => $perPage,
+                    'current_page' => $page,
+                    'last_page' => $lastPage,
+                    'from' => $total > 0 ? $offset + 1 : 0,
+                    'to' => min($offset + $data->count(), $total),
+                    'has_more' => $page < $lastPage,
+                ],
+            ]));
+        } catch (\Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Sales Return list for one customer — matches LedgerService's rule: an
+     * orders row counts as a return once Sales_Return_VoucherNo is populated,
+     * dated by Sales_Return_Dt. Amount is recomputed from orders_item since
+     * there's no return-amount column on `orders` itself.
+     * GET /api/orders/customer/{buyerUserId}/returns?from=&to=&page=&per_page=
+     */
+    public function customerReturns(Request $request, $buyerUserId)
+    {
+        if (!ctype_digit((string) $buyerUserId) || (int) $buyerUserId <= 0) {
+            return response()->json([
+                'success' => false,
+                'message' => 'buyer_userid must be a positive integer',
+            ], 422);
+        }
+
+        try {
+            if (!\Schema::hasTable('orders_item') || !\Schema::hasColumn('orders', 'Sales_Return_VoucherNo')) {
+                return response()->json([
+                    'success' => true,
+                    'data' => [],
+                    'pagination' => [
+                        'total' => 0,
+                        'per_page' => 20,
+                        'current_page' => 1,
+                        'last_page' => 1,
+                        'from' => 0,
+                        'to' => 0,
+                        'has_more' => false,
+                    ],
+                ]);
+            }
+
+            $resolvedBuyerUserId = (int) $buyerUserId;
+            $perPage = min(max((int) $request->get('per_page', 20), 1), 200);
+            $page = max((int) $request->get('page', 1), 1);
+
+            $query = DB::table('orders')
+                ->where('buyer_userid', $resolvedBuyerUserId)
+                ->whereNotNull('Sales_Return_VoucherNo')
+                ->where('Sales_Return_VoucherNo', '!=', '');
+
+            if ($from = $request->get('from')) {
+                $query->whereDate('Sales_Return_Dt', '>=', $from);
+            }
+            if ($to = $request->get('to')) {
+                $query->whereDate('Sales_Return_Dt', '<=', $to);
+            }
+
+            $total = (clone $query)->count();
+            $lastPage = max((int) ceil($total / $perPage), 1);
+            $page = min($page, $lastPage);
+            $offset = ($page - 1) * $perPage;
+
+            $rows = $query
+                ->orderByDesc('Sales_Return_Dt')
+                ->orderByDesc('order_id')
+                ->offset($offset)
+                ->limit($perPage)
+                ->select('order_id', 'Sales_Return_VoucherNo', 'Sales_Return_Dt', 'Sales_Return_Reason')
+                ->get();
+
+            $amountByOrderId = DB::table('orders_item')
+                ->whereIn('order_id', $rows->pluck('order_id')->all())
+                ->groupBy('order_id')
+                ->select('order_id', DB::raw('COALESCE(SUM(qty_returned * item_price), 0) as t'))
+                ->pluck('t', 'order_id');
+
+            $data = $rows->map(fn ($o) => [
+                'order_id' => (int) $o->order_id,
+                'doc_no' => (string) $o->Sales_Return_VoucherNo,
+                'doc_date' => $o->Sales_Return_Dt,
+                'amount' => (float) ($amountByOrderId[$o->order_id] ?? 0),
+                'reason' => $o->Sales_Return_Reason,
+            ])->values();
+
+            return response()->json($this->sanitizeForJson([
+                'success' => true,
+                'data' => $data,
+                'pagination' => [
+                    'total' => $total,
+                    'per_page' => $perPage,
+                    'current_page' => $page,
+                    'last_page' => $lastPage,
+                    'from' => $total > 0 ? $offset + 1 : 0,
+                    'to' => min($offset + $data->count(), $total),
+                    'has_more' => $page < $lastPage,
+                ],
+            ]));
+        } catch (\Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
     public function customerProductHistory(Request $request, $buyerUserId)
     {
         if (!ctype_digit((string) $buyerUserId) || (int) $buyerUserId <= 0) {

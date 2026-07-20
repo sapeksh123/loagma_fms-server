@@ -8,6 +8,7 @@ use App\Http\Controllers\HsnCodeController;
 use App\Http\Controllers\UnitMasterController;
 use App\Http\Controllers\TaxController;
 use App\Http\Controllers\OrderController;
+use App\Http\Controllers\PurchaseController;
 use App\Http\Controllers\SupplierController;
 use App\Http\Controllers\UserController;
 use App\Http\Controllers\GeneralAccountController;
@@ -676,7 +677,16 @@ Route::prefix('orders')->middleware(['throttle:240,1'])->group(function () {
     Route::get('/health/missing-items', [OrderController::class, 'missingItemsHealth']);
     Route::get('/customer/{buyerUserId}/history', [OrderController::class, 'customerOrderHistory']);
     Route::get('/customer/{buyerUserId}/product-history', [OrderController::class, 'customerProductHistory']);
+    Route::get('/customer/{buyerUserId}/invoices', [OrderController::class, 'customerInvoices']);
+    Route::get('/customer/{buyerUserId}/returns', [OrderController::class, 'customerReturns']);
     Route::get('/{id}', [OrderController::class, 'show']);
+});
+
+// Purchase Routes (supplier-side Order / Invoice / Return, read-only)
+Route::prefix('purchases')->middleware(['throttle:240,1'])->group(function () {
+    Route::get('/orders', [PurchaseController::class, 'orders']);
+    Route::get('/invoices', [PurchaseController::class, 'invoices']);
+    Route::get('/returns', [PurchaseController::class, 'returns']);
 });
 
 // Auth Routes (staff login via deli_staff table)
