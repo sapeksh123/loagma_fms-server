@@ -621,6 +621,7 @@ Route::prefix('subcategories')->middleware(['api.key', 'throttle:60,1'])->group(
 Route::prefix('products')->middleware(['throttle:240,1'])->group(function () {
     Route::get('/', [ProductController::class, 'index']);
     Route::get('/sales-report', [ProductController::class, 'salesReport']);
+    Route::get('/sales-report-orders', [ProductController::class, 'salesReportOrders']);
     Route::get('/{id}', [ProductController::class, 'show']);
     Route::middleware(['api.key', 'throttle:60,1'])->group(function () {
         Route::post('/basic', [ProductController::class, 'storeBasic']);

@@ -24,6 +24,15 @@ class ProductController extends Controller
             $page = max((int) $request->get('page', 1), 1);
             $perPage = min(max((int) $request->get('per_page', 20), 1), 50);
             $status = strtolower(trim((string) $request->get('status', 'all')));
+            if (!in_array($status, ['all', 'registered', 'pending', 'dispatched'], true)) {
+                $status = 'all';
+            }
+
+            $orderIdParam = trim((string) $request->get('order_id', ''));
+            $orderIdFilter = (ctype_digit($orderIdParam) && (int) $orderIdParam > 0) ? (int) $orderIdParam : null;
+
+            $customerName = trim((string) $request->get('customer', $request->get('buyer_name', '')));
+
             $dayFilter = strtolower(trim((string) $request->get('day_filter', '')));
             $dateFilter = strtolower(trim((string) $request->get('date_filter', $dayFilter === '' ? 'all' : $dayFilter)));
 
@@ -88,7 +97,7 @@ class ProductController extends Controller
             }
 
 
-            $cacheKey = 'sales_report:v4:' . md5(json_encode([
+            $cacheKey = 'sales_report:v5:' . md5(json_encode([
                 'search' => $search,
                 'page' => $page,
                 'perPage' => $perPage,
@@ -96,6 +105,8 @@ class ProductController extends Controller
                 'dateFilter' => $dateFilter,
                 'fromTs' => $fromTs,
                 'toTs' => $toTs,
+                'orderId' => $orderIdFilter,
+                'customerName' => $customerName,
             ]));
 
             $responsePayload = Cache::remember($cacheKey, now()->addSeconds(45), function () use (
@@ -104,7 +115,9 @@ class ProductController extends Controller
                 $perPage,
                 $status,
                 $fromTs,
-                $toTs
+                $toTs,
+                $orderIdFilter,
+                $customerName
             ) {
                 // Build the base query with all filters/search applied first
                 $baseQuery = DB::table('product as p')
@@ -122,11 +135,34 @@ class ProductController extends Controller
                     });
                 }
 
-                // Add more filters here as needed (status, date, etc.)
-                // Example: $baseQuery->where('p.status', $status);
+                // Narrow to products touched by a specific order and/or customer.
+                if ($orderIdFilter !== null || $customerName !== '') {
+                    $matchingProductIds = $this->resolveProductIdsForOrderFilters(
+                        $orderIdFilter,
+                        $customerName,
+                        $status,
+                        $fromTs,
+                        $toTs
+                    );
 
-                // If date filters are present, join with sales/order tables as needed
-                // ...existing code for date filter joins...
+                    if (empty($matchingProductIds)) {
+                        return [
+                            'success' => true,
+                            'data' => [],
+                            'pagination' => [
+                                'total' => 0,
+                                'per_page' => $perPage,
+                                'current_page' => $page,
+                                'last_page' => 1,
+                                'from' => 0,
+                                'to' => 0,
+                                'has_more' => false,
+                            ],
+                        ];
+                    }
+
+                    $baseQuery->whereIn('p.product_id', $matchingProductIds);
+                }
 
                 // Group and aggregate as needed
                 $reportGroupedQuery = (clone $baseQuery)
@@ -166,7 +202,7 @@ class ProductController extends Controller
                     try {
                         // Load package stats for visible products even in "All Time"
                         // so package chips and order IDs are always available in UI.
-                        $packageStats = $this->getPackageStatsForProducts($productIds, $status, $fromTs, $toTs);
+                        $packageStats = $this->getPackageStatsForProducts($productIds, $status, $fromTs, $toTs, $orderIdFilter, $customerName);
                     } catch (\Throwable $e) {
                         $packageStats = [];
                     }
@@ -203,6 +239,163 @@ class ProductController extends Controller
             });
 
             return response()->json($responsePayload);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $this->normalizeBackendError($e),
+            ], 500);
+        }
+    }
+
+    // GET /api/products/sales-report-orders
+    // "Load more" pagination for a single product+package's order list.
+    public function salesReportOrders(Request $request)
+    {
+        try {
+            $productId = (int) $request->get('product_id', 0);
+            if ($productId <= 0) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'product_id is required',
+                ], 422);
+            }
+
+            $hasPackageFilter = $request->has('package_id');
+            $packageId = trim((string) $request->get('package_id', ''));
+
+            $page = max((int) $request->get('page', 1), 1);
+            $perPage = min(max((int) $request->get('per_page', 24), 1), 100);
+
+            $status = strtolower(trim((string) $request->get('status', 'all')));
+            if (!in_array($status, ['all', 'registered', 'pending', 'dispatched'], true)) {
+                $status = 'all';
+            }
+
+            $orderIdParam = trim((string) $request->get('order_id', ''));
+            $orderIdFilter = (ctype_digit($orderIdParam) && (int) $orderIdParam > 0) ? (int) $orderIdParam : null;
+
+            $customerName = trim((string) $request->get('customer', $request->get('buyer_name', '')));
+
+            $fromDate = trim((string) $request->get('from_date', ''));
+            $toDate = trim((string) $request->get('to_date', ''));
+            $fromTsParam = trim((string) $request->get('from_ts', ''));
+            $toTsParam = trim((string) $request->get('to_ts', ''));
+
+            $fromTs = null;
+            $toTs = null;
+
+            $dayFilter = strtolower(trim((string) $request->get('day_filter', '')));
+            $dateFilter = strtolower(trim((string) $request->get('date_filter', $dayFilter === '' ? 'all' : $dayFilter)));
+
+            if ($dateFilter !== '' && $dateFilter !== 'all') {
+                $predefinedRange = $this->resolveDateRange($dateFilter);
+                if ($predefinedRange !== null) {
+                    $fromTs = $predefinedRange['from'];
+                    $toTs = $predefinedRange['to'];
+                }
+            }
+
+            if ($fromTsParam !== '' && ctype_digit($fromTsParam)) {
+                $fromTs = (int) $fromTsParam;
+            }
+
+            if ($toTsParam !== '' && ctype_digit($toTsParam)) {
+                $toTs = (int) $toTsParam;
+            }
+
+            if ($fromTs === null && $fromDate !== '') {
+                foreach (['Y-m-d', 'd/m/Y', 'd-m-Y'] as $format) {
+                    try {
+                        $fromTs = Carbon::createFromFormat($format, $fromDate)->startOfDay()->timestamp;
+                        break;
+                    } catch (\Exception $e) {
+                        // Try next format.
+                    }
+                }
+            }
+
+            if ($toTs === null && $toDate !== '') {
+                foreach (['Y-m-d', 'd/m/Y', 'd-m-Y'] as $format) {
+                    try {
+                        $toTs = Carbon::createFromFormat($format, $toDate)->endOfDay()->timestamp;
+                        break;
+                    } catch (\Exception $e) {
+                        // Try next format.
+                    }
+                }
+            }
+
+            $query = DB::table('orders_item as oi')
+                ->join('orders as o', 'o.order_id', '=', 'oi.order_id')
+                ->where('oi.product_id', $productId);
+
+            if ($hasPackageFilter) {
+                $query->whereRaw("COALESCE(JSON_UNQUOTE(JSON_EXTRACT(oi.pinfo, '$.pi')), '') = ?", [$packageId]);
+            }
+
+            if ($status !== '' && $status !== 'all') {
+                $query->where('o.order_state', $status);
+            }
+
+            if ($fromTs !== null) {
+                $query->where('o.start_time', '>=', $fromTs);
+            }
+
+            if ($toTs !== null) {
+                $query->where('o.start_time', '<=', $toTs);
+            }
+
+            if ($orderIdFilter !== null) {
+                $query->where('o.order_id', $orderIdFilter);
+            }
+
+            $this->applyCustomerFilter($query, $customerName);
+
+            $total = (clone $query)->count();
+            $lastPage = max((int) ceil($total / $perPage), 1);
+            $offset = ($page - 1) * $perPage;
+
+            $rows = $query
+                ->select(
+                    'o.order_id',
+                    'o.buyer_userid',
+                    'o.start_time',
+                    'o.order_state',
+                    DB::raw('COALESCE(oi.qty_delivered, oi.quantity) as quantity'),
+                    DB::raw('COALESCE(oi.item_total, 0) as amount')
+                )
+                ->orderByDesc('o.start_time')
+                ->offset($offset)
+                ->limit($perPage)
+                ->get();
+
+            $shopNameByBuyerId = $this->getShopNamesByBuyerIds(
+                $rows->pluck('buyer_userid')->filter()->map(fn($v) => (int) $v)->unique()->values()->all()
+            );
+
+            $data = $rows->map(function ($r) use ($shopNameByBuyerId) {
+                $buyerId = (int) ($r->buyer_userid ?? 0);
+                return [
+                    'order_id' => (int) ($r->order_id ?? 0),
+                    'quantity' => (int) ($r->quantity ?? 0),
+                    'amount' => (float) ($r->amount ?? 0),
+                    'customer_name' => $shopNameByBuyerId[$buyerId] ?? ('User #' . $buyerId),
+                    'order_date' => (int) ($r->start_time ?? 0),
+                    'order_state' => (string) ($r->order_state ?? ''),
+                ];
+            })->values();
+
+            return response()->json([
+                'success' => true,
+                'data' => $data,
+                'pagination' => [
+                    'total' => $total,
+                    'per_page' => $perPage,
+                    'current_page' => $page,
+                    'last_page' => $lastPage,
+                    'has_more' => $page < $lastPage,
+                ],
+            ]);
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -259,26 +452,34 @@ class ProductController extends Controller
         }
     }
 
-    private function getPackageStatsForProducts(array $productIds, string $status, ?int $fromTs, ?int $toTs): array
+    private function getPackageStatsForProducts(
+        array $productIds,
+        string $status,
+        ?int $fromTs,
+        ?int $toTs,
+        ?int $orderIdFilter = null,
+        string $customerName = ''
+    ): array
     {
         if (empty($productIds)) {
             return [];
         }
 
-        $query = DB::table('orders_item as oi')
+        $maxVisibleOrders = 24;
+
+        $aggQuery = DB::table('orders_item as oi')
             ->whereIn('oi.product_id', $productIds);
 
-        $this->applyOrderExistsFilter($query, $status, $fromTs, $toTs, 'oi.order_id', false);
+        $this->applyOrderExistsFilter($aggQuery, $status, $fromTs, $toTs, 'oi.order_id', false, $orderIdFilter, $customerName);
 
-        $rows = $query
+        $aggRows = $aggQuery
             ->select(
                 'oi.product_id',
                 DB::raw("COALESCE(JSON_UNQUOTE(JSON_EXTRACT(oi.pinfo, '$.pi')), '') as package_id"),
                 DB::raw("COALESCE(JSON_UNQUOTE(JSON_EXTRACT(oi.pinfo, '$.ps')), JSON_UNQUOTE(JSON_EXTRACT(oi.pinfo, '$.tx')), 'Default Package') as package_label"),
                 DB::raw("COALESCE(JSON_UNQUOTE(JSON_EXTRACT(oi.pinfo, '$.pu')), '') as package_unit"),
                 DB::raw('COUNT(DISTINCT oi.order_id) as orders_count'),
-                DB::raw('COALESCE(SUM(COALESCE(oi.qty_delivered, oi.quantity)), 0) as total_quantity'),
-                DB::raw("SUBSTRING_INDEX(GROUP_CONCAT(DISTINCT oi.order_id ORDER BY oi.order_id DESC SEPARATOR ','), ',', 12) as order_ids_csv")
+                DB::raw('COALESCE(SUM(COALESCE(oi.qty_delivered, oi.quantity)), 0) as total_quantity')
             )
             ->groupBy(
                 'oi.product_id',
@@ -288,39 +489,89 @@ class ProductController extends Controller
             )
             ->get();
 
-        $maxVisibleOrderIds = 12;
-        $result = [];
+        // Real per-order rows (order id, qty, amount, customer, date, status) —
+        // cannot be produced via GROUP_CONCAT, so this is a second, un-grouped
+        // query bounded to the same page of products.
+        $detailQuery = DB::table('orders_item as oi')
+            ->join('orders as o', 'o.order_id', '=', 'oi.order_id')
+            ->whereIn('oi.product_id', $productIds);
 
-        foreach ($rows as $row) {
+        $this->applyOrderExistsFilter($detailQuery, $status, $fromTs, $toTs, 'oi.order_id', false, $orderIdFilter, $customerName);
+
+        $detailRows = $detailQuery
+            ->select(
+                'oi.product_id',
+                DB::raw("COALESCE(JSON_UNQUOTE(JSON_EXTRACT(oi.pinfo, '$.pi')), '') as package_id"),
+                DB::raw("COALESCE(JSON_UNQUOTE(JSON_EXTRACT(oi.pinfo, '$.ps')), JSON_UNQUOTE(JSON_EXTRACT(oi.pinfo, '$.tx')), 'Default Package') as package_label"),
+                DB::raw("COALESCE(JSON_UNQUOTE(JSON_EXTRACT(oi.pinfo, '$.pu')), '') as package_unit"),
+                'o.order_id',
+                'o.buyer_userid',
+                'o.start_time',
+                'o.order_state',
+                DB::raw('COALESCE(oi.qty_delivered, oi.quantity) as quantity'),
+                DB::raw('COALESCE(oi.item_total, 0) as amount')
+            )
+            ->orderByDesc('o.start_time')
+            ->get();
+
+        $shopNameByBuyerId = $this->getShopNamesByBuyerIds(
+            $detailRows->pluck('buyer_userid')->filter()->map(fn($v) => (int) $v)->unique()->values()->all()
+        );
+
+        $ordersByGroup = [];
+        foreach ($detailRows as $row) {
             $productId = (int) ($row->product_id ?? 0);
             if ($productId <= 0) {
                 continue;
             }
 
-            $allOrderIds = collect(explode(',', (string) ($row->order_ids_csv ?? '')))
-                ->map(fn($value) => (int) trim($value))
-                ->filter(fn($value) => $value > 0)
-                ->unique()
-                ->values()
-                ->all();
+            $groupKey = $productId . '|' . trim((string) ($row->package_id ?? '')) . '|' .
+                trim((string) ($row->package_label ?? '')) . '|' . trim((string) ($row->package_unit ?? ''));
 
-            $visibleOrderIds = array_slice($allOrderIds, 0, $maxVisibleOrderIds);
+            $buyerId = (int) ($row->buyer_userid ?? 0);
+
+            $ordersByGroup[$groupKey][] = [
+                'order_id' => (int) ($row->order_id ?? 0),
+                'quantity' => (int) ($row->quantity ?? 0),
+                'amount' => (float) ($row->amount ?? 0),
+                'customer_name' => $shopNameByBuyerId[$buyerId] ?? ('User #' . $buyerId),
+                'order_date' => (int) ($row->start_time ?? 0),
+                'order_state' => (string) ($row->order_state ?? ''),
+            ];
+        }
+
+        $result = [];
+
+        foreach ($aggRows as $row) {
+            $productId = (int) ($row->product_id ?? 0);
+            if ($productId <= 0) {
+                continue;
+            }
+
+            $packageId = trim((string) ($row->package_id ?? ''));
+            $packageLabel = trim((string) ($row->package_label ?? '')) === ''
+                ? 'Default Package'
+                : trim((string) ($row->package_label ?? ''));
+            $packageUnit = trim((string) ($row->package_unit ?? ''));
+
+            $groupKey = $productId . '|' . $packageId . '|' . $packageLabel . '|' . $packageUnit;
+            $groupOrders = $ordersByGroup[$groupKey] ?? [];
             $ordersCount = (int) ($row->orders_count ?? 0);
+            $visibleOrders = array_slice($groupOrders, 0, $maxVisibleOrders);
 
             if (!isset($result[$productId])) {
                 $result[$productId] = [];
             }
 
             $result[$productId][] = [
-                'package_id' => trim((string) ($row->package_id ?? '')),
-                'package_label' => trim((string) ($row->package_label ?? '')) === ''
-                    ? 'Default Package'
-                    : trim((string) ($row->package_label ?? '')),
-                'package_unit' => trim((string) ($row->package_unit ?? '')),
+                'package_id' => $packageId,
+                'package_label' => $packageLabel,
+                'package_unit' => $packageUnit,
                 'orders_count' => $ordersCount,
                 'total_quantity' => (int) ($row->total_quantity ?? 0),
-                'order_ids' => $visibleOrderIds,
-                'more_order_ids_count' => max($ordersCount - count($visibleOrderIds), 0),
+                'orders' => $visibleOrders,
+                'more_order_ids_count' => max($ordersCount - count($visibleOrders), 0),
+                'has_more' => $ordersCount > count($visibleOrders),
             ];
         }
 
@@ -338,16 +589,74 @@ class ProductController extends Controller
         return $result;
     }
 
+    private function getShopNamesByBuyerIds(array $ids): array
+    {
+        try {
+            $cleanIds = array_values(array_filter(array_map(fn($v) => (int) $v, $ids), fn($v) => $v > 0));
+            if (empty($cleanIds) || !Schema::hasTable('user') || !Schema::hasColumn('user', 'shop_name')) {
+                return [];
+            }
+
+            return DB::table('user')->whereIn('userid', $cleanIds)
+                ->pluck('shop_name', 'userid')
+                ->map(fn($name) => is_string($name) ? trim($name) : '')
+                ->toArray();
+        } catch (\Exception $e) {
+            return [];
+        }
+    }
+
+    private function resolveProductIdsForOrderFilters(
+        ?int $orderIdFilter,
+        string $customerName,
+        string $status,
+        ?int $fromTs,
+        ?int $toTs
+    ): array {
+        if ($orderIdFilter === null && $customerName === '') {
+            return [];
+        }
+
+        $query = DB::table('orders_item as oi')
+            ->join('orders as o', 'o.order_id', '=', 'oi.order_id');
+
+        if ($orderIdFilter !== null) {
+            $query->where('o.order_id', $orderIdFilter);
+        }
+
+        if ($status !== '' && $status !== 'all') {
+            $query->where('o.order_state', $status);
+        }
+
+        if ($fromTs !== null) {
+            $query->where('o.start_time', '>=', $fromTs);
+        }
+
+        if ($toTs !== null) {
+            $query->where('o.start_time', '<=', $toTs);
+        }
+
+        $this->applyCustomerFilter($query, $customerName);
+
+        return $query->distinct()->pluck('oi.product_id')
+            ->map(fn($id) => (int) $id)
+            ->filter(fn($id) => $id > 0)
+            ->values()
+            ->all();
+    }
+
     private function applyOrderExistsFilter(
         $query,
         string $status,
         ?int $fromTs,
         ?int $toTs,
         string $orderIdColumn,
-        bool $includeAlternateOrderIds = true
+        bool $includeAlternateOrderIds = true,
+        ?int $orderIdFilter = null,
+        string $customerName = ''
     ): void
     {
-        $query->whereExists(function ($exists) use ($status, $fromTs, $toTs, $orderIdColumn, $includeAlternateOrderIds) {
+        $query->whereExists(function ($exists) use ($status, $fromTs, $toTs, $orderIdColumn, $includeAlternateOrderIds, $orderIdFilter, $customerName) {
             $exists->select(DB::raw('1'))
                 ->from('orders as o')
                 ->where(function ($match) use ($orderIdColumn, $includeAlternateOrderIds) {
@@ -359,11 +668,7 @@ class ProductController extends Controller
                 });
 
             if ($status !== '' && $status !== 'all') {
-                if ($status === 'pending') {
-                    $exists->whereIn('o.order_state', ['registered', 'pending']);
-                } else {
-                    $exists->where('o.order_state', $status);
-                }
+                $exists->where('o.order_state', $status);
             }
 
             if ($fromTs !== null) {
@@ -372,6 +677,47 @@ class ProductController extends Controller
 
             if ($toTs !== null) {
                 $exists->where('o.start_time', '<=', $toTs);
+            }
+
+            if ($orderIdFilter !== null) {
+                $exists->where('o.order_id', $orderIdFilter);
+            }
+
+            $this->applyCustomerFilter($exists, $customerName);
+        });
+    }
+
+    // Matches either an exact buyer_userid (when $customerName is purely
+    // numeric) or a partial shop_name match — so the Customer filter accepts
+    // both a typed name and a pasted user ID.
+    private function applyCustomerFilter($query, string $customerName): void
+    {
+        if ($customerName === '') {
+            return;
+        }
+
+        $isNumericId = ctype_digit($customerName);
+        $hasShopNameLookup = Schema::hasTable('user') && Schema::hasColumn('user', 'shop_name');
+
+        if (!$isNumericId && !$hasShopNameLookup) {
+            // No way to match a name-based filter; match nothing rather than
+            // silently ignoring the filter.
+            $query->whereRaw('1 = 0');
+            return;
+        }
+
+        if ($hasShopNameLookup) {
+            // LEFT JOIN, not an inner join: a numeric buyer_userid match must
+            // still work even if that buyer has no matching `user` row.
+            $query->leftJoin('user as u', 'u.userid', '=', 'o.buyer_userid');
+        }
+
+        $query->where(function ($q) use ($customerName, $isNumericId, $hasShopNameLookup) {
+            if ($isNumericId) {
+                $q->orWhere('o.buyer_userid', (int) $customerName);
+            }
+            if ($hasShopNameLookup) {
+                $q->orWhere('u.shop_name', 'LIKE', '%' . $customerName . '%');
             }
         });
     }
