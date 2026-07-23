@@ -46,6 +46,7 @@ class OrderController extends Controller
                     'data' => [],
                     'pagination' => [
                         'total' => 0,
+                        'total_amount' => 0,
                         'per_page' => 20,
                         'current_page' => 1,
                         'last_page' => 1,
@@ -213,6 +214,7 @@ class OrderController extends Controller
             }
 
             $total = $query->count();
+            $totalAmount = (float) (clone $query)->sum('order_total');
             $lastPage = max((int) ceil($total / $perPage), 1);
             $page = min($page, $lastPage);
             $offset = ($page - 1) * $perPage;
@@ -277,6 +279,7 @@ class OrderController extends Controller
                 'data' => $data,
                 'pagination' => [
                     'total' => $total,
+                    'total_amount' => $totalAmount,
                     'per_page' => $perPage,
                     'current_page' => $page,
                     'last_page' => $lastPage,

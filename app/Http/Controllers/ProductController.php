@@ -499,15 +499,34 @@ class ProductController extends Controller
                 $query->where('in_stock', $request->in_stock === 'true' ? 1 : 0);
             }
 
-            // Search filter (apply before limit)
+            // Search filter (apply before limit) — LOWER() on both sides makes
+            // this case-insensitive regardless of the columns' collation.
             if ($request->has('search') && !empty($request->search)) {
                 $tokens = array_values(array_filter(explode(' ', trim($request->search)), fn($t) => $t !== ''));
                 foreach ($tokens as $token) {
-                    $query->where(function ($q) use ($token) {
-                        $q->where('name', 'LIKE', "%$token%")
-                          ->orWhere('brand', 'LIKE', "%$token%")
-                          ->orWhere('description', 'LIKE', "%$token%")
-                          ->orWhere('keywords', 'LIKE', "%$token%");
+                    $needle = '%' . mb_strtolower($token) . '%';
+                    $query->where(function ($q) use ($needle) {
+                        $q->whereRaw('LOWER(name) LIKE ?', [$needle])
+                          ->orWhereRaw('LOWER(brand) LIKE ?', [$needle])
+                          ->orWhereRaw('LOWER(description) LIKE ?', [$needle])
+                          ->orWhereRaw('LOWER(keywords) LIKE ?', [$needle]);
+                    });
+                }
+            }
+
+            // Keyword filter (the separate "Search by Keyword" field) — matches
+            // any of the given comma/space-separated keywords against the
+            // product's keywords column, case-insensitively.
+            if ($request->has('keywords') && !empty($request->keywords)) {
+                $tokens = array_values(array_filter(
+                    preg_split('/[\s,]+/', trim($request->keywords)),
+                    fn($t) => $t !== ''
+                ));
+                if (!empty($tokens)) {
+                    $query->where(function ($q) use ($tokens) {
+                        foreach ($tokens as $token) {
+                            $q->orWhereRaw('LOWER(keywords) LIKE ?', ['%' . mb_strtolower($token) . '%']);
+                        }
                     });
                 }
             }
